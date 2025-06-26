@@ -85,10 +85,10 @@ class Critic(nn.Module):
 
     def projection(
         self,
-        obs: jnp.ndarray,
-        actions: jnp.ndarray,
-        rewards: jnp.ndarray,
-        bootstrap: jnp.ndarray,
+        obs: jax.Array,
+        actions: jax.Array,
+        rewards: jax.Array,
+        bootstrap: jax.Array,
         discount: float,
     ) -> Tuple[jax.Array, jax.Array]:
         q1_proj = self.qnet1.projection(
@@ -99,7 +99,7 @@ class Critic(nn.Module):
         )
         return q1_proj, q2_proj
 
-    def get(self, atoms: jnp.ndarray) -> jnp.ndarray:
+    def get(self, atoms: jax.Array) -> jax.Array:
         return (atoms * self.q_support).sum(axis=-1)
 
 class Actor(nn.Module):
@@ -112,7 +112,7 @@ class Actor(nn.Module):
     std_max: float
 
     @nn.compact
-    def __call__(self, obs: jnp.ndarray) -> jnp.ndarray:
+    def __call__(self, obs: jax.Array) -> jax.Array:
         x = nn.Dense(self.hidden_dim)(obs)
         x = nn.relu(x)
         x = nn.Dense(self.hidden_dim // 2)(x)
