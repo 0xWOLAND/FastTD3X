@@ -1,9 +1,8 @@
 import jax
 import jax.numpy as jnp
 from flax import linen as nn
-from typing import Optional
 
-    
+from typing import Optional, Tuple
 class DistributionalQNetwork(nn.Module):
     n_obs: int
     n_act: int
@@ -15,15 +14,13 @@ class DistributionalQNetwork(nn.Module):
     @nn.compact
     def __call__(self, obs: jax.Array, act: jax.Array) -> jax.Array:
         x = jnp.concatenate([obs, act], axis=-1)
-        net = nn.Sequential([
-            nn.Dense(self.hidden_dim),
-            nn.relu,
-            nn.Dense(self.hidden_dim // 2),
-            nn.relu,
-            nn.Dense(self.hidden_dim // 4),
-            nn.relu,
-        ])
-        x = net(x)
+        x = nn.Dense(self.hidden_dim)(x)
+        x = nn.relu(x)
+        x = nn.Dense(self.hidden_dim // 2)(x)
+        x = nn.relu(x)
+        x = nn.Dense(self.hidden_dim // 4)(x)
+        x = nn.relu(x)
+        x = nn.Dense(self.num_atoms)(x)
         return x
     
     def projection(
@@ -83,7 +80,7 @@ class Critic(nn.Module):
         self.q_support = jnp.linspace(self.v_min, self.v_max, self.num_atoms)
 
     @nn.compact
-    def __call__(self, obs: jnp.ndarray, act: jnp.ndarray):
+    def __call__(self, obs: jax.Array, act: jax.Array) -> Tuple[jax.Array, jax.Array]:
         return self.qnet1(obs, act), self.qnet2(obs, act)
 
     def projection(
@@ -93,7 +90,7 @@ class Critic(nn.Module):
         rewards: jnp.ndarray,
         bootstrap: jnp.ndarray,
         discount: float,
-    ):
+    ) -> Tuple[jax.Array, jax.Array]:
         q1_proj = self.qnet1.projection(
             obs, actions, rewards, bootstrap, discount, self.q_support
         )
@@ -105,77 +102,120 @@ class Critic(nn.Module):
     def get(self, atoms: jnp.ndarray) -> jnp.ndarray:
         return (atoms * self.q_support).sum(axis=-1)
 
-
 class Actor(nn.Module):
-    n_obs:      int
-    n_act:      int
-    n_envs:     int
+    n_obs: int
+    n_act: int
+    n_envs: int
     init_scale: float
     hidden_dim: int
-    std_min:    float = 0.05
-    std_max:    float = 0.8
+    std_min: float
+    std_max: float
 
-    def setup(self):
-        self.net = nn.Sequential([
-            nn.Dense(self.hidden_dim),
-            nn.relu,
-            nn.Dense(self.hidden_dim // 2),
-            nn.relu,
-            nn.Dense(self.hidden_dim // 4),
-            nn.relu,
-        ])
-
-        self.fc_mu = nn.Dense(
-            self.n_act,
-            kernel_init=nn.initializers.normal(stddev=self.init_scale),
-            bias_init=nn.initializers.zeros,
-        )
-
-        init_scales = jax.random.uniform(
-            self.make_rng('noise_init'),
-            (self.n_envs, 1),
-            minval=self.std_min,
-            maxval=self.std_max
-        )
-        self.noise_scales = self.variable(
-            'explore', 'noise_scales', lambda: init_scales
-        )
-
+    @nn.compact
     def __call__(self, obs: jnp.ndarray) -> jnp.ndarray:
-        x = self.net(obs)
-        mu = jnp.tanh(self.fc_mu(x))
-        return mu
+        x = nn.Dense(self.hidden_dim)(obs)
+        x = nn.relu(x)
+        x = nn.Dense(self.hidden_dim // 2)(x)
+        x = nn.relu(x)
+        x = nn.Dense(self.hidden_dim // 4)(x)
+        x = nn.relu(x)
+
+        mu = nn.Dense(
+            self.n_act,
+            kernel_init=nn.initializers.normal(self.init_scale),
+            bias_init=nn.initializers.zeros
+        )(x)
+        return jnp.tanh(mu)
+
 
     def explore(
         self,
-        obs: jnp.ndarray,
-        deterministic: bool = False,
-        dones: Optional[jnp.ndarray] = None
-    ) -> jnp.ndarray:
-        mask = (
-            dones.reshape(-1, 1)
-            if dones is not None
-            else jnp.zeros((self.n_envs, 1), dtype=bool)
-        )
+        obs: jax.Array,
+        rng: jax.Array,
+        noise_scales: jax.Array,
+        dones: Optional[jax.Array],
+        deterministic: bool,
+        std_min: float,
+        std_max: float,
+    ) -> jax.Array:
+        rng_resample, rng_noise = jax.random.split(rng)
 
-        rng = self.make_rng('explore')
-        rng_new, rng_noise = jax.random.split(rng)
+        dones_mask = (
+            dones.reshape(-1, 1).astype(bool)
+            if dones is not None else
+            jnp.zeros_like(noise_scales, dtype=bool)
+        )
 
         new_scales = jax.random.uniform(
-            rng_new, (self.n_envs, 1),
-            minval=self.std_min,
-            maxval=self.std_max
+            rng_resample, noise_scales.shape,
+            minval=std_min, maxval=std_max,
         )
-
-        noise = jax.random.normal(rng_noise, (obs.shape[0], self.n_act))
-
-        scales = jnp.where(mask, new_scales, self.noise_scales.value)
-        self.noise_scales.value = scales
+        scales = jnp.where(dones_mask, new_scales, noise_scales)
 
         mu = self(obs)
+        noise = jax.random.normal(rng_noise, mu.shape)
+        return jnp.where(deterministic, mu, mu + noise * scales)
 
-        return jnp.where(
-            deterministic,
-            mu,
-            mu + noise * scales
+class MultiTaskActor(Actor):
+    num_tasks:      int
+    task_embed_dim: int
+
+    def setup(self):
+        super().setup()
+        self.task_embed = self.param(
+            "task_embed",
+            nn.initializers.orthogonal(),
+            (self.num_tasks, self.task_embed_dim),
+        )
+
+    @nn.compact
+    def __call__(self, obs: jax.Array) -> jax.Array:
+        core    = obs[:, :-self.num_tasks]
+        one_hot = obs[:, -self.num_tasks:]
+        task_emb = one_hot @ self.task_embed
+        obs = jnp.concatenate([core, task_emb], axis=-1)
+
+        return super().__call__(obs)
+
+class MultiTaskCritic(Critic):
+    num_tasks:      int
+    task_embed_dim: int
+
+    def setup(self):
+        super().setup()
+
+        self.task_embed = self.param(
+            "task_embed",
+            nn.initializers.orthogonal(),
+            (self.num_tasks, self.task_embed_dim),
+        )
+    
+    @nn.compact
+    def __call__(self, obs: jax.Array, act: jax.Array) -> Tuple[jax.Array, jax.Array]:
+        core    = obs[:, :-self.num_tasks]
+        one_hot = obs[:, -self.num_tasks:]
+        task_emb = one_hot @ self.task_embed
+        obs = jnp.concatenate([core, task_emb], axis=-1)
+
+        return super().__call__(obs, act)
+
+    def projection(
+        self,
+        obs: jax.Array,
+        actions: jax.Array,
+        rewards: jax.Array,
+        bootstrap: jax.Array,
+        discount: float,
+    ) -> Tuple[jax.Array, jax.Array]:
+        core    = obs[..., :-self.num_tasks]
+        one_hot = obs[..., -self.num_tasks:]
+        task_emb = one_hot @ self.task_embed
+        obs = jnp.concatenate([core, task_emb], axis=-1)
+
+        return super().projection(
+            obs,
+            actions,
+            rewards,
+            bootstrap,
+            discount,
         )
