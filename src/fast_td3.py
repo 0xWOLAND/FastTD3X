@@ -99,6 +99,7 @@ class Critic(nn.Module):
         )
         return q1_proj, q2_proj
 
+    @jax.jit
     def get(self, atoms: jax.Array) -> jax.Array:
         return (atoms * self.q_support).sum(axis=-1)
 
@@ -219,3 +220,11 @@ class MultiTaskCritic(Critic):
             bootstrap,
             discount,
         )
+
+__all__ = [
+    'DistributionalQNetwork',
+    'Critic', 
+    'Actor',
+    'MultiTaskActor',
+    'MultiTaskCritic'
+]
