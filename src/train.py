@@ -58,9 +58,6 @@ def main():
     critic_params = critic.init(rng, obs_batch, action_batch)
     target_critic_params = critic_params
     
-    # Create q_support array for distributional critic
-    q_support = jnp.linspace(args.v_min, args.v_max, args.num_atoms)
-    
     # Create optimizers with schedulers
     actor_lr_schedule = linear_schedule(
         init_value=args.actor_learning_rate,
@@ -89,12 +86,7 @@ def main():
         'ptr': 0,
         'size': 0
     }
-    
-    # Training functions
-    @jax.jit
-    def compute_q_value(atoms: jax.Array, q_support: jax.Array) -> jax.Array:
-        return (atoms * q_support).sum(axis=-1)
-    
+
     @jax.jit
     def update_critic(critic_params, target_critic_params, actor_params, batch):
         obs, actions, rewards, next_obs, dones = batch
@@ -102,15 +94,15 @@ def main():
         # Target Q-values
         next_actions = actor.apply(actor_params, next_obs)
         q1_target_atoms, q2_target_atoms = critic.apply(target_critic_params, next_obs, next_actions)
-        q1_target = compute_q_value(q1_target_atoms, q_support)
-        q2_target = compute_q_value(q2_target_atoms, q_support)
+        q1_target = critic.apply(target_critic_params, q1_target_atoms, method=Critic.get)
+        q2_target = critic.apply(target_critic_params, q2_target_atoms, method=Critic.get)
         target_q = jnp.minimum(q1_target, q2_target)
         target_q = rewards + args.gamma * (1 - dones) * target_q
         
         # Current Q-values
         q1_atoms, q2_atoms = critic.apply(critic_params, obs, actions)
-        q1 = compute_q_value(q1_atoms, q_support)
-        q2 = compute_q_value(q2_atoms, q_support)
+        q1 = critic.apply(critic_params, q1_atoms, method=Critic.get)
+        q2 = critic.apply(critic_params, q2_atoms, method=Critic.get)
         q1_loss = jnp.mean((q1 - target_q) ** 2)
         q2_loss = jnp.mean((q2 - target_q) ** 2)
         critic_loss = q1_loss + q2_loss
@@ -124,15 +116,15 @@ def main():
         # Target Q-values
         next_actions = actor.apply(actor_params, next_obs)
         q1_target_atoms, q2_target_atoms = critic.apply(target_critic_params, next_obs, next_actions)
-        q1_target = compute_q_value(q1_target_atoms, q_support)
-        q2_target = compute_q_value(q2_target_atoms, q_support)
+        q1_target = critic.apply(target_critic_params, q1_target_atoms, method=Critic.get)
+        q2_target = critic.apply(target_critic_params, q2_target_atoms, method=Critic.get)
         target_q = jnp.minimum(q1_target, q2_target)
         target_q = rewards + args.gamma * (1 - dones) * target_q
         
         # Current Q-values
         q1_atoms, q2_atoms = critic.apply(critic_params, obs, actions)
-        q1 = compute_q_value(q1_atoms, q_support)
-        q2 = compute_q_value(q2_atoms, q_support)
+        q1 = critic.apply(critic_params, q1_atoms, method=Critic.get)
+        q2 = critic.apply(critic_params, q2_atoms, method=Critic.get)
         q1_loss = jnp.mean((q1 - target_q) ** 2)
         q2_loss = jnp.mean((q2 - target_q) ** 2)
         critic_loss = q1_loss + q2_loss
@@ -145,8 +137,8 @@ def main():
         
         actions = actor.apply(actor_params, obs)
         q1_atoms, q2_atoms = critic.apply(critic_params, obs, actions)
-        q1 = compute_q_value(q1_atoms, q_support)
-        q2 = compute_q_value(q2_atoms, q_support)
+        q1 = critic.apply(critic_params, q1_atoms, method=Critic.get)
+        q2 = critic.apply(critic_params, q2_atoms, method=Critic.get)
         q_value = jnp.minimum(q1, q2)
         actor_loss = -jnp.mean(q_value)
         
@@ -156,11 +148,9 @@ def main():
     def update_target(target_params, params, tau=0.005):
         return jax.tree.map(lambda t, p: tau * p + (1 - tau) * t, target_params, params)
     
-    # Training loop
     for step in range(TOTAL_STEPS):
-        # Collect experience
         obs_batch = jnp.expand_dims(obs, axis=0)
-        action = actor.apply(actor_params, obs_batch) + jax.random.normal(jax.random.key(step), (1, action_dim)) * 0.1
+        action = actor.apply(actor_params, obs_batch) + jax.random.normal(jax.random.key(step), (1, action_dim)) * 0.05
         action = jnp.clip(action, -1, 1)
         
         next_obs, reward, done, truncated, info = env.step(action[0])
