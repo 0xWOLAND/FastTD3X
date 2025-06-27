@@ -1,73 +1,63 @@
 import jax
 import jax.numpy as jnp
-from jax import jit, lax
-from flax import struct
-from dataclasses import replace
-from typing import Optional, Tuple
 
-@jit
-def _update_normalizer(count, mean, var, std, until, eps, x):
-    """Update running mean, variance, and std with batch x."""
-    def _update():
-        batch_size = x.shape[0]
-        new_count = count + batch_size
-        batch_mean = jnp.mean(x, axis=0)
-        delta = batch_mean - mean
-        new_mean = mean + delta * (batch_size / new_count)
 
-        batch_var = jnp.mean((x - batch_mean) ** 2, axis=0)
-        delta2 = batch_mean - new_mean
-        m_a = var * count
-        m_b = batch_var * batch_size
-        M2 = m_a + m_b + delta2**2 * (count * batch_size / new_count)
-        new_var = M2 / new_count
-        new_std = jnp.sqrt(new_var)
+def init(
+    shape,
+    eps: float = 1e-8,
+    until: int = -1,
+) -> dict:
+    return dict(
+        eps=eps,
+        until=until,
+        count=jnp.array(0, jnp.int32),
+        mean=jnp.zeros(shape, jnp.float32),
+        M2=jnp.zeros(shape, jnp.float32),
+        std=jnp.ones(shape, jnp.float32),
+    )
 
-        return new_count, new_mean, new_var, new_std
+@jax.jit
+def update(normalizer: dict, x: jnp.ndarray) -> dict:
+    count = normalizer['count']
+    eps = normalizer['eps']
+    until = normalizer['until']
+    mean = normalizer['mean']
+    M2 = normalizer['M2']
+    std = normalizer['std']
 
-    def _identity():
-        return count, mean, var, std
+    # compute new stats
+    batch_n = x.shape[0]
+    total_n = count + batch_n
+    batch_mean = jnp.mean(x, axis=0)
+    delta = batch_mean - mean
+    new_mean = mean + delta * (batch_n / total_n)
+    batch_var = jnp.mean((x - batch_mean) ** 2, axis=0)
+    delta2 = batch_mean - new_mean
+    M2_total = M2 + batch_var * batch_n + delta * delta2 * count
+    new_M2 = M2_total
+    new_std = jnp.sqrt(new_M2 / jnp.maximum(total_n - 1, 1))
+    new_count = total_n
 
-    cond = (until is not None) & (count >= until)
-    return lax.cond(cond, _identity, _update)
-
-@jit
-def _normalize(mean, std, eps, x, center):
-    """Normalize x given current mean and std."""
-    denom = std + eps
-    return (x - mean) / denom if center else x / denom
-
-@struct.dataclass
-class EmpiricalNormalization:
-    """Online normalization with empirical mean and variance."""
-    eps: float
-    until: Optional[int]
-    count: jnp.ndarray = struct.field(pytree_node=False)
-    mean: jnp.ndarray
-    var: jnp.ndarray
-    std: jnp.ndarray
-
-    @classmethod
-    def create(cls, shape: Tuple[int, ...], eps: float = 1e-8, until: Optional[int] = None) -> "EmpiricalNormalization":
-        mean = jnp.zeros(shape)
-        var = jnp.ones(shape)
-        std = jnp.ones(shape)
-        count = jnp.array(0, dtype=jnp.int32)
-        return cls(eps, until, count, mean, var, std)
-
-    def update(self, x: jnp.ndarray) -> "EmpiricalNormalization":
-        """Update running mean, variance, and std with batch x."""
-        new_count, new_mean, new_var, new_std = _update_normalizer(
-            self.count, self.mean, self.var, self.std, self.until, self.eps, x
-        )
-        return replace(
-            self,
+    # cond: skip update if until>=0 and count>=until
+    cond = (until >= 0) & (count >= until)
+    return jax.lax.cond(
+        cond,
+        lambda _: normalizer,
+        lambda _: dict(
+            eps=eps,
+            until=until,
             count=new_count,
             mean=new_mean,
-            var=new_var,
-            std=new_std
-        )
+            M2=new_M2,
+            std=new_std,
+        ),
+        operand=None,
+    )
 
-    def normalize(self, x: jnp.ndarray, center: bool = True) -> jnp.ndarray:
-        """Normalize x given current mean and std."""
-        return _normalize(self.mean, self.std, self.eps, x, center)
+@jax.jit
+def normalize(normalizer: dict, x: jnp.ndarray, center: bool = True) -> jnp.ndarray:
+    mean = normalizer['mean']
+    std = normalizer['std']
+    eps = normalizer['eps']
+    denom = std + eps
+    return jnp.where(center, (x - mean) / denom, x / denom)

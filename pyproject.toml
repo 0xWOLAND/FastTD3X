@@ -1,5 +1,5 @@
 [project]
-name = "fasttd3x"
+name = "fast_td3x"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
@@ -7,5 +7,7 @@ requires-python = ">=3.11"
 dependencies = [
     "flax>=0.10.6",
     "gymnasium>=1.1.1",
+    "jax[cuda]>=0.6.2",
+    "ml-collections>=1.1.0",
     "tyro>=0.9.24",
 ]
