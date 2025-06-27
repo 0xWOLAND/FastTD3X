@@ -219,3 +219,11 @@ class MultiTaskCritic(Critic):
             bootstrap,
             discount,
         )
+
+__all__ = [
+    'DistributionalQNetwork',
+    'Critic', 
+    'Actor',
+    'MultiTaskActor',
+    'MultiTaskCritic'
+]
