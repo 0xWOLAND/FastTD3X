@@ -1,13 +1,13 @@
 import jax
 import jax.numpy as jnp
-
+from flax import linen as nn
+from functools import partial
 
 def init_buffer(
     n_env: int,
     buffer_size: int,
     n_obs: int,
     n_act: int,
-    n_critic_obs: int,
     playground_mode: bool = False,
     gamma: float = 0.99,
 ) -> dict:
@@ -16,7 +16,6 @@ def init_buffer(
         'buffer_size': buffer_size,
         'n_obs': n_obs,
         'n_act': n_act,
-        'n_critic_obs': n_critic_obs,
         'playground_mode': playground_mode,
         'gamma': gamma,
         'observations': jnp.zeros((n_env, buffer_size, n_obs), jnp.float32),
@@ -25,37 +24,48 @@ def init_buffer(
         'dones': jnp.zeros((n_env, buffer_size), jnp.int32),
         'truncations': jnp.zeros((n_env, buffer_size), jnp.int32),
         'next_observations': jnp.zeros((n_env, buffer_size, n_obs), jnp.float32),
-        'critic_observations': jnp.zeros((n_env, buffer_size, n_critic_obs), jnp.float32),
-        'next_critic_observations': jnp.zeros((n_env, buffer_size, n_critic_obs), jnp.float32),
-        'privileged_observations': jnp.zeros((n_env, buffer_size, n_critic_obs - n_obs), jnp.float32),
-        'next_privileged_observations': jnp.zeros((n_env, buffer_size, n_critic_obs - n_obs), jnp.float32),
         'ptr': jnp.array(0, jnp.int32),
     }
 
 
 @jax.jit
 def extend(buffer: dict, data: dict) -> dict:
-    """
-    Functional update: insert one batch of transitions into the circular buffer.
+    """Extend the replay buffer with new data.
+    
+    Args:
+        buffer: Replay buffer dict containing the current buffer state
+        data: Dict containing the new data to add:
+            - observations: Array of shape [n_env, n_obs] - current observations
+            - actions: Array of shape [n_env, n_act] - actions taken
+            - next: Dict containing:
+                - observations: Array of shape [n_env, n_obs] - next observations
+                - rewards: Array of shape [n_env] - rewards received
+                - dones: Array of shape [n_env] - done flags
+                - truncations: Array of shape [n_env] - truncation flags
+    
+    Returns:
+        dict: Updated replay buffer with new data added
     """
     idx = buffer['ptr'] % buffer['buffer_size']
-    # base updates
-    obs = buffer['observations'].at[:, idx].set(data['observations'])
-    acts = buffer['actions'].at[:, idx].set(data['actions'])
-    rwds = buffer['rewards'].at[:, idx].set(data['next']['rewards'])
-    dns = buffer['dones'].at[:, idx].set(data['next']['dones'])
-    trc = buffer['truncations'].at[:, idx].set(data['next']['truncations'])
-    next_obs = buffer['next_observations'].at[:, idx].set(data['next']['observations'])
-    # critic updates
-    full_crit = buffer['critic_observations'].at[:, idx].set(data['critic_observations'])
-    full_next_crit = buffer['next_critic_observations'].at[:, idx].set(data['next']['critic_observations'])
-    priv = data['critic_observations'][..., buffer['n_obs']:]
-    next_priv = data['next']['critic_observations'][..., buffer['n_obs']:]
-    priv_upd = buffer['privileged_observations'].at[:, idx].set(priv)
-    next_priv_upd = buffer['next_privileged_observations'].at[:, idx].set(next_priv)
-    # select mode
-    crit_obs = jax.lax.select(buffer['playground_mode'], priv_upd, full_crit)
-    next_crit_obs = jax.lax.select(buffer['playground_mode'], next_priv_upd, full_next_crit)
+    
+    # Extract data parameters for clarity
+    obs_data = data['observations']
+    act_data = data['actions']
+    
+    next_obs_data = data['next']['observations']
+    next_rewards_data = data['next']['rewards']
+    next_dones_data = data['next']['dones']
+    next_truncations_data = data['next']['truncations']
+    
+    # Base updates
+    obs = buffer['observations'].at[:, idx].set(obs_data)
+    acts = buffer['actions'].at[:, idx].set(act_data)
+    rwds = buffer['rewards'].at[:, idx].set(next_rewards_data)
+    dns = buffer['dones'].at[:, idx].set(next_dones_data)
+    trc = buffer['truncations'].at[:, idx].set(next_truncations_data)
+    next_obs = buffer['next_observations'].at[:, idx].set(next_obs_data)
+    
+    
     return {
         **buffer,
         'observations': obs,
@@ -64,23 +74,19 @@ def extend(buffer: dict, data: dict) -> dict:
         'dones': dns,
         'truncations': trc,
         'next_observations': next_obs,
-        'critic_observations': crit_obs,
-        'next_critic_observations': next_crit_obs,
-        'privileged_observations': priv_upd,
-        'next_privileged_observations': next_priv_upd,
         'ptr': buffer['ptr'] + 1,
     }
 
 
-@jax.jit
-def sample(buffer: dict, batch_size: int) -> dict:
+@partial(jax.jit, static_argnums=(2,3))
+# TODO: Replay buffer boundary edge case logic (e.g. rolling back truncation flags if full)
+def sample(buffer: dict, key: jax.Array, n_env: int, batch_size: int) -> dict:
     size = jnp.minimum(buffer['ptr'], buffer['buffer_size'])
-    idx = jax.random.randint(0, (buffer['n_env'], batch_size), 0, size) # TODO: use key for randomness
+    idx = jax.random.randint(key, (n_env, batch_size), 0, size)
     # expand idx for 3D gathers
     idx3 = idx[..., None]
     
     def gather(arr: jnp.ndarray) -> jnp.ndarray:
-        # arr shape [n_env, buffer_size, D]
         D = arr.shape[-1]
         idx_expanded = idx3.repeat(D, axis=-1)
         return jnp.take_along_axis(arr, idx_expanded, axis=1).reshape(-1, D)
@@ -91,29 +97,18 @@ def sample(buffer: dict, batch_size: int) -> dict:
     rwds = gather(buffer['rewards'][..., None]).squeeze(-1)
     dns = gather(buffer['dones'][..., None]).squeeze(-1)
     trc = gather(buffer['truncations'][..., None]).squeeze(-1)
-    full_crit = gather(buffer['critic_observations'])
-    next_full_crit = gather(buffer['next_critic_observations'])
-    priv = gather(buffer['privileged_observations'])
-    next_priv = gather(buffer['next_privileged_observations'])
-    # select mode
-    crit = jax.lax.select(buffer['playground_mode'], jnp.concatenate([obs, priv], -1), full_crit)
-    next_crit = jax.lax.select(buffer['playground_mode'], jnp.concatenate([next_obs, next_priv], -1), next_full_crit)
     return {
         'observations': obs,
         'actions': acts,
-        'critic_observations': crit,
         'next': {
             'observations': next_obs,
-            'critic_observations': next_crit,
             'rewards': rwds,
             'dones': dns,
             'truncations': trc,
             'effective_n_steps': jnp.ones_like(rwds),
         }
     }
-
-
-class ReplayBuffer:
+class ReplayBuffer(nn.Module):
     """A simple replay buffer for storing and sampling transitions."""
     
     @staticmethod
@@ -122,8 +117,6 @@ class ReplayBuffer:
         buffer_size: int,
         n_obs: int,
         n_act: int,
-        n_critic_obs: int,
-        asymmetric_obs: bool = False,
         playground_mode: bool = False
     ):
         """Create a new replay buffer."""
@@ -132,7 +125,6 @@ class ReplayBuffer:
             buffer_size=buffer_size,
             n_obs=n_obs,
             n_act=n_act,
-            n_critic_obs=n_critic_obs,
             playground_mode=playground_mode
         )
         return ReplayBuffer(buffer)
@@ -151,4 +143,4 @@ class ReplayBuffer:
     
     def sample(self, key: jax.Array, batch_size: int):
         """Sample a batch of transitions."""
-        return sample(self.buffer, batch_size)
+        return sample(self.buffer, key, int(self.buffer['n_env']), batch_size)

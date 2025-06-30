@@ -1,5 +1,6 @@
 import jax
 import jax.numpy as jnp
+from flax import linen as nn
 
 
 def init_buffer(
@@ -95,12 +96,9 @@ def sample(buffer: dict, batch_size: int) -> dict:
         }
     }
 
-class RewardNormalizer:
-    """A reward normalizer that tracks running statistics of rewards."""
-    
+class RewardNormalizer(nn.Module):
     @staticmethod
     def create(gamma: float, shape: tuple, g_max: float = 10.0, epsilon: float = 1e-8):
-        """Create a new reward normalizer."""
         return RewardNormalizer(
             gamma=gamma,
             shape=shape,
