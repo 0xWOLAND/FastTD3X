@@ -67,7 +67,7 @@ def normalize(normalizer: dict, x: jnp.ndarray, center: bool = True) -> jnp.ndar
 
     return jnp.where(center, (x - mean) / denom, x / denom)
 
-class EmpiricalNormalization(nn.Module):
+class EmpiricalNormalize(nn.Module):
     def __init__(self, shape, eps: float = 1e-8, until: int = -1):
         super().__init__()
         self.state = init(shape, eps, until)

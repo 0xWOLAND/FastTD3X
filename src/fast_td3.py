@@ -1,8 +1,12 @@
 import jax
 import jax.numpy as jnp
-from flax import linen as nn
 
-from typing import Optional, Tuple
+from flax import linen as nn
+from flax.core import FrozenDict
+
+from typing import Optional, Tuple, Any
+from functools import partial
+
 class DistributionalQNetwork(nn.Module):
     n_obs: int
     n_act: int
@@ -127,34 +131,46 @@ class Actor(nn.Module):
         )(x)
         return jnp.tanh(mu)
 
-
     def explore(
         self,
+        params: FrozenDict,
         obs: jax.Array,
         rng: jax.Array,
         noise_scales: jax.Array,
-        dones: Optional[jax.Array],
-        deterministic: bool,
-        std_min: float,
-        std_max: float,
-    ) -> jax.Array:
-        rng_resample, rng_noise = jax.random.split(rng)
+        dones: Optional[jax.Array] = None,
+        deterministic: bool = False,
+    ) -> Tuple[jax.Array, jax.Array]:
 
-        dones_mask = (
-            dones.reshape(-1, 1).astype(bool)
-            if dones is not None else
-            jnp.zeros_like(noise_scales, dtype=bool)
-        )
+        @partial(jax.jit, static_argnames=("deterministic",))
+        def _explore(
+            params: FrozenDict,
+            noise_scales: jax.Array,     
+            obs: jax.Array,              
+            rng: jax.Array,
+            std_min: float,
+            std_max: float,
+            dones: jax.Array,  
+            deterministic: bool = False,
+        ) -> Tuple[jax.Array, jax.Array]:
 
-        new_scales = jax.random.uniform(
-            rng_resample, noise_scales.shape,
-            minval=std_min, maxval=std_max,
-        )
-        scales = jnp.where(dones_mask, new_scales, noise_scales)
+            rng_resample, rng_noise = jax.random.split(rng)
+            candidate = jax.random.uniform(
+                rng_resample,
+                shape=noise_scales.shape,
+                minval=std_min,
+                maxval=std_max,
+            )
 
-        mu = self(obs)
-        noise = jax.random.normal(rng_noise, mu.shape)
-        return jnp.where(deterministic, mu, mu + noise * scales)
+            mask = dones.reshape(-1, 1) 
+            noise_scsales = jnp.where(mask, candidate, noise_scales)
+            mu = self.apply(params, obs)
+            noise = jax.random.normal(rng_noise, mu.shape) * noise_scsales
+            action = jnp.where(deterministic, mu, mu + noise)
+
+            return action, noise_scsales
+
+        dones = jnp.zeros((self.n_envs), bool) if dones is None else dones
+        return _explore(params, noise_scales, obs, rng, self.std_min, self.std_max, dones, deterministic)
 
 class MultiTaskActor(Actor):
     num_tasks:      int

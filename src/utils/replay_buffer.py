@@ -48,7 +48,6 @@ def extend(buffer: dict, data: dict) -> dict:
     """
     idx = buffer['ptr'] % buffer['buffer_size']
     
-    # Extract data parameters for clarity
     obs_data = data['observations']
     act_data = data['actions']
     
@@ -57,7 +56,6 @@ def extend(buffer: dict, data: dict) -> dict:
     next_dones_data = data['next']['dones']
     next_truncations_data = data['next']['truncations']
     
-    # Base updates
     obs = buffer['observations'].at[:, idx].set(obs_data)
     acts = buffer['actions'].at[:, idx].set(act_data)
     rwds = buffer['rewards'].at[:, idx].set(next_rewards_data)
