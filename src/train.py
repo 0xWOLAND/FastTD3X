@@ -21,10 +21,10 @@ deterministic = False
 
 def main():
     args = BaseArgs()
-    env = gym.make("Pendulum-v1")
+    env = gym.make_vec("Pendulum-v1", num_envs=args.num_envs)
 
     obs, _ = env.reset()
-    obs_dim = obs.shape[0]
+    obs_dim = obs.shape[1] # TODO: Should be this or -1  
     assert env.action_space.shape is not None, "Action space must have a shape"
     act_dim = env.action_space.shape[0]
 
@@ -48,10 +48,10 @@ def main():
     )
 
     normalize = EmpiricalNormalize(obs_dim)
-    obs = normalize(jnp.array([obs]))
+    obs = normalize(obs)
 
     actor_params = actor.init(prng, obs)
-    critic_params = critic.init(prng, obs, jnp.zeros((1, act_dim)))
+    critic_params = critic.init(prng, obs, jnp.zeros((args.num_envs, act_dim)))
 
     actor_tx = optax.adamw(learning_rate=args.actor_learning_rate)
     critic_tx = optax.adamw(learning_rate=args.critic_learning_rate)
@@ -79,7 +79,9 @@ def main():
 
     for step in range(1):
         # for step in range(args.total_timesteps):
-        action, noise_scales = actor.explore(actor_params, obs, prng, noise_scales, deterministic=deterministic)
+        action, noise_scales = actor.explore(actor_state.params, obs, prng, noise_scales, deterministic=deterministic)
+        print(f'action shape: {action.shape}')
+        print(f'act_dim: {act_dim}')
         next_obs, rewards, dones, truncations, infos = env.step(action)
 
         print("INFO: ", infos)

@@ -162,12 +162,12 @@ class Actor(nn.Module):
             )
 
             mask = dones.reshape(-1, 1) 
-            noise_scsales = jnp.where(mask, candidate, noise_scales)
+            noise_scales = jnp.where(mask, candidate, noise_scales)
             mu = self.apply(params, obs)
-            noise = jax.random.normal(rng_noise, mu.shape) * noise_scsales
+            noise = jax.random.normal(rng_noise, mu.shape) * noise_scales
             action = jnp.where(deterministic, mu, mu + noise)
 
-            return action, noise_scsales
+            return action, noise_scales
 
         dones = jnp.zeros((self.n_envs), bool) if dones is None else dones
         return _explore(params, noise_scales, obs, rng, self.std_min, self.std_max, dones, deterministic)
